@@ -83,6 +83,30 @@ table of contents and relative images. Rendered by
 
 Force a page break in the PDF with `<div class="page-break"></div>`.
 
+## Resource usage
+
+Rough numbers from my own machine, measured as PSS on a 4-page document. Treat
+them as indicative rather than a benchmark: they will vary with your desktop,
+Qt build and document size.
+
+| | RAM | CPU |
+|---|---|---|
+| Editor, idle | ~360 MB | ~0% |
+| Editor, while typing | ~360 MB | ~2% of one core |
+| `md2pdf` (CLI) | ~70 MB | ~1s per run, then exits |
+
+For context, on the same machine and document, gnome-text-editor used ~130 MB
+and ghostwriter ~220 MB.
+
+The editor is not the lightest option, and that is a deliberate trade. Most of
+that memory is QtWebEngine, the browser engine that renders the preview. It is
+also what makes the preview and the PDF come out of the same renderer, so what
+you see on screen is what lands in the file. Qt's built-in `QTextBrowser` would
+cost roughly 60 MB instead, but it does not support the print CSS the exporter
+relies on, so the preview would stop matching the output.
+
+The CLI does not load Qt at all, so scripted exports stay cheap.
+
 ## Styling
 
 `doc.css` is the document typography, shared by the preview and the PDF.
