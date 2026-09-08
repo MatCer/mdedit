@@ -1,0 +1,13 @@
+
+@page {
+    size: A4;
+    margin: 20mm 18mm 20mm 18mm;
+    @bottom-center {
+        content: counter(page) " / " counter(pages);
+        font-family: "DejaVu Sans", Helvetica, sans-serif;
+        font-size: 9pt;
+        color: #888;
+    }
+}
+html { font-size: 11pt; }
+body { margin: 0; }

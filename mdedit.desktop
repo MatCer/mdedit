@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=mdedit
+GenericName=Markdown Editor
+Comment=Edit Markdown with live preview and PDF export
+Exec=mdedit %f
+Icon=text-markdown
+Terminal=false
+Categories=Office;WordProcessor;TextEditor;
+MimeType=text/markdown;text/x-markdown;
+StartupNotify=true
+StartupWMClass=mdedit
+Keywords=markdown;md;editor;pdf;
