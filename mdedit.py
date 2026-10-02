@@ -12,11 +12,13 @@ shortcuts:
     Ctrl+E    export PDF      Ctrl+N    new
     Ctrl+P    toggle preview  Ctrl+Q    quit
     Ctrl+D    dark preview    F11       fullscreen
+    Ctrl+1/2  Markdown / PDF preview tab
     F5        refresh preview
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -34,13 +36,16 @@ from PyQt6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStatusBar,
+    QTabBar,
     QToolBar,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mdcore
+import mermaid_qt
 
 PREVIEW_SHELL = """<!DOCTYPE html>
 <html><head><meta charset="utf-8">
@@ -58,12 +63,40 @@ body {{ margin: 0; padding: 22px 0 40px; }}
     font-size: {font_size};
 }}
 {doc_css}
+{mode_css}
 {dark_css}
-</style></head>
+</style>
+<script src="{mermaid_js}"></script></head>
 <body><div class="page"><div class="markdown-body">
 {body}
-</div></div></body></html>
+</div></div>
+<script>
+if (window.mermaid) {{
+  mermaid.initialize({mermaid_config});
+  mermaid.run({{querySelector: "pre.mermaid"}}).catch(() => {{}});
+}}
+</script></body></html>
 """
+
+# Markdown tab: the same typography as a plain readable column, no A4 sheet.
+PLAIN_CSS = """
+html { background: #fff; }
+body { padding: 0; }
+.page {
+    width: auto;
+    max-width: 920px;
+    min-height: 0;
+    padding: 28px 40px 48px;
+    background: transparent;
+    box-shadow: none;
+}
+"""
+PLAIN_DARK_CSS = """
+html { background: #2b2e33; }
+.page { background: transparent; box-shadow: none; }
+"""
+
+MARKDOWN_TAB, PDF_TAB = 0, 1
 
 # Dark preview is a viewing aid only: it never touches the exported PDF.
 # Rather than inverting the page (which turns white into harsh black), this is a
@@ -112,13 +145,14 @@ html { background: #202225; }
 .markdown-body th { background: #363b42; color: #e9ecf0; }
 .markdown-body tbody tr:nth-child(even) { background: #2f333a; }
 
-.markdown-body .admonition {
+.markdown-body .admonition,
+.markdown-body .markdown-alert {
     background: #31363d;
     border-color: #414750;
     border-left-color: #5b8def;
 }
 
-.markdown-body .footnote {
+.markdown-body .footnotes {
     color: #a8aeb8;
     border-top-color: #40454d;
 }
@@ -161,10 +195,24 @@ class Editor(QMainWindow):
         self.edit.textChanged.connect(self.schedule_render)
 
         self.view = QWebEngineView()
+        mermaid_qt.allow_remote(self.view.page())
+
+        # Markdown (default): plain readable render. PDF: the A4 page as exported.
+        self.tabs = QTabBar()
+        self.tabs.addTab("Markdown")
+        self.tabs.addTab("PDF")
+        self.tabs.setToolTip("Ctrl+1 / Ctrl+2")
+        self.tabs.currentChanged.connect(lambda _: self.render())
+        preview = QWidget()
+        box = QVBoxLayout(preview)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+        box.addWidget(self.tabs)
+        box.addWidget(self.view)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(self.edit)
-        self.split.addWidget(self.view)
+        self.split.addWidget(preview)
         self.split.setSizes([600, 700])
         self.setCentralWidget(self.split)
 
@@ -262,6 +310,8 @@ class Editor(QMainWindow):
         v = m.addMenu("&View")
         act("Toggle &Preview", "Ctrl+P", self.toggle_preview, v)
         act("&Refresh", "F5", self.render, v)
+        act("&Markdown Preview", "Ctrl+1", lambda: self.tabs.setCurrentIndex(MARKDOWN_TAB), v)
+        act("P&DF Preview", "Ctrl+2", lambda: self.tabs.setCurrentIndex(PDF_TAB), v)
         v.addSeparator()
         self.dark_action = act("&Dark preview", "Ctrl+D", self.toggle_dark, v)
         self.dark_action.setCheckable(True)
@@ -335,16 +385,25 @@ class Editor(QMainWindow):
         except Exception as exc:  # keep the last good preview on error
             self.statusBar().showMessage(f"render error: {exc}", 4000)
             return
+        plain = self.tabs.currentIndex() == MARKDOWN_TAB
+        mermaid_config = {
+            "startOnLoad": False,
+            "theme": "dark" if self.dark else "default",
+            # The PDF tab draws labels the way the export does (see mermaid_qt).
+            **({} if plain else {"htmlLabels": False, "flowchart": {"htmlLabels": False}}),
+        }
         html = PREVIEW_SHELL.format(
             doc_css=self.doc_css,
             body=body,
             margin=self.margin,
             font_size=self.font_size,
-            dark_css=DARK_CSS if self.dark else "",
+            mode_css=PLAIN_CSS if plain else "",
+            dark_css=(DARK_CSS + (PLAIN_DARK_CSS if plain else "")) if self.dark else "",
             backdrop="#1b1b1b" if self.dark else "#6b6b6b",
+            mermaid_js=mermaid_qt.mermaid_script_url(),
+            mermaid_config=json.dumps(mermaid_config),
         )
         base = QUrl.fromLocalFile(str((self.path or Path.cwd()).parent) + "/")
-        pos = self.view.page().scrollPosition()
         self.view.setHtml(html, base)
         words = len(text.split())
         self.statusBar().showMessage(f"{words} words · {len(text)} chars")
@@ -493,22 +552,33 @@ class Editor(QMainWindow):
         name, _ = QFileDialog.getSaveFileName(self, "Export PDF", default, "PDF (*.pdf)")
         if not name:
             return
+        text = self.edit.toPlainText()
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             base = self.path.parent if self.path else Path.cwd()
-            pages = mdcore.write_pdf(self.edit.toPlainText(), name, Path(name).stem, base)
+            svgs = mermaid_qt.render_svgs(mdcore.mermaid_sources(text))
+            pages = mdcore.write_pdf(text, name, Path(name).stem, base, mermaid_svgs=svgs)
             self.statusBar().showMessage(f"exported {name} ({pages} pages)", 5000)
         except Exception as exc:
             QMessageBox.critical(self, "Export failed", str(exc))
+        finally:
+            QApplication.restoreOverrideCursor()
 
     def export_html(self) -> None:
         default = str(self.path.with_suffix(".html")) if self.path else str(Path.home() / "document.html")
         name, _ = QFileDialog.getSaveFileName(self, "Export HTML", default, "HTML (*.html)")
         if not name:
             return
-        Path(name).write_text(
-            mdcore.build_html(self.edit.toPlainText(), Path(name).stem, inline_css=True),
-            encoding="utf-8",
-        )
+        text = self.edit.toPlainText()
+        try:
+            svgs = mermaid_qt.render_svgs(mdcore.mermaid_sources(text))
+            Path(name).write_text(
+                mdcore.build_html(text, Path(name).stem, inline_css=True, mermaid_svgs=svgs),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Export failed", str(exc))
+            return
         self.statusBar().showMessage(f"exported {name}", 4000)
 
     def closeEvent(self, event) -> None:

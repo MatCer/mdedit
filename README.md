@@ -62,11 +62,15 @@ After install, `.md` files open in mdedit on double-click.
 | `Ctrl+E` | export PDF |
 | `Ctrl+Shift+E` | export HTML |
 | `Ctrl+P` | toggle preview pane |
+| `Ctrl+1` / `Ctrl+2` | Markdown / PDF preview tab |
 | `Ctrl+D` | dark preview |
 | `F11` / `Esc` | fullscreen / leave fullscreen |
 | `Ctrl+` `+` / `-` / `0` | preview zoom |
 | `F5` | refresh preview |
 | `Ctrl+R` | reload stylesheet |
+
+The preview has two tabs. **Markdown** (the default) is a plain readable
+render. **PDF** shows the A4 page exactly as it will be exported.
 
 The editor remembers window size and position, maximized/fullscreen state, the
 split ratio, preview zoom and the dark toggle.
@@ -76,10 +80,19 @@ document, byte for byte identical whether dark mode is on or off.
 
 ## Markdown support
 
-Tables, fenced code, footnotes, definition lists, abbreviations, admonitions,
-table of contents and relative images. Rendered by
-[python-markdown](https://python-markdown.github.io/) with the `extra`,
-`sane_lists`, `admonition` and `toc` extensions.
+CommonMark plus GitHub extensions: tables, task lists, strikethrough,
+autolinks, footnotes and `> [!NOTE]` alerts. Also definition lists,
+`!!! note` admonitions, relative images and Mermaid diagrams. Rendered by
+[markdown-it-py](https://markdown-it-py.readthedocs.io/).
+
+Lists behave as on GitHub: no blank line is needed before a list, and nested
+items can be indented by 2 spaces.
+
+A ` ```mermaid ` code block is drawn as a diagram in the preview, in exported
+PDFs and in exported HTML. Export draws the diagrams in an offscreen QtWebEngine
+page, so `md2pdf` needs the GUI dependencies for this; on a CLI-only install
+the diagram source is printed instead. `install.sh` bundles mermaid.js, so this
+works offline.
 
 Force a page break in the PDF with `<div class="page-break"></div>`.
 
