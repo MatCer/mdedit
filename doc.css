@@ -40,6 +40,16 @@
 .markdown-body li { margin-bottom: .25em; }
 .markdown-body li > ul,
 .markdown-body li > ol { margin-bottom: 0; }
+.markdown-body .contains-task-list { list-style: none; padding-left: .4em; }
+.markdown-body .task-list-item-checkbox {
+    display: inline-block;
+    width: .85em;
+    height: .85em;
+    margin: 0 .45em 0 0;
+    vertical-align: -.1em;
+}
+.markdown-body dt { font-weight: 700; }
+.markdown-body dd { margin: 0 0 .6em 1.6em; }
 
 .markdown-body blockquote {
     margin: 1em 0;
@@ -113,7 +123,8 @@
 .markdown-body a { color: #1d4ed8; text-decoration: none; word-wrap: break-word; }
 
 /* ── Misc ─────────────────────────────────────────────────── */
-.markdown-body .admonition {
+.markdown-body .admonition,
+.markdown-body .markdown-alert {
     border: 1px solid #e5e7eb;
     border-left: 4px solid #3b82f6;
     background: #f8fafc;
@@ -122,14 +133,28 @@
     border-radius: 4px;
     break-inside: avoid;
 }
-.markdown-body .admonition-title { font-weight: 700; margin-bottom: .3em; }
+.markdown-body .admonition-title,
+.markdown-body .markdown-alert-title { font-weight: 700; margin-bottom: .3em; }
 
-.markdown-body .footnote {
+.markdown-body .footnotes-sep { display: none; }
+.markdown-body .footnotes {
     font-size: .88em;
     color: #555;
     border-top: 1px solid #ddd;
     margin-top: 2em;
 }
+.markdown-body .footnote-backref { font-family: "DejaVu Sans", sans-serif; }
+
+/* Mermaid diagrams: <pre class="mermaid"> until drawn, an SVG <figure> in the PDF */
+.markdown-body figure.mermaid,
+.markdown-body pre.mermaid[data-processed] {
+    text-align: center;
+    margin: 1em 0;
+    background: none;
+    border: none;
+    break-inside: avoid;
+}
+.markdown-body figure.mermaid img { max-width: 100%; }
 
 /* Explicit page break: `<div class="page-break"></div>` in the Markdown */
 .markdown-body .page-break { break-after: page; }

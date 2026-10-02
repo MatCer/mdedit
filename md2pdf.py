@@ -18,6 +18,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import mdcore
 
 
+def mermaid_svgs(text: str) -> list[str | None] | None:
+    """Draw ```mermaid blocks with QtWebEngine, loaded only when there are any.
+
+    Without PyQt6 (CLI-only install) the diagrams stay as their source.
+    """
+    sources = mdcore.mermaid_sources(text)
+    if not sources:
+        return None
+    try:
+        import PyQt6.QtWebEngineCore  # noqa: F401  (mermaid_qt imports Qt lazily)
+        import mermaid_qt
+    except ImportError:
+        print("note: PyQt6-WebEngine not installed, mermaid diagrams left as source", file=sys.stderr)
+        return None
+    svgs = mermaid_qt.render_svgs(sources)
+    if None in svgs:
+        print(f"note: {svgs.count(None)} mermaid diagram(s) failed to parse, left as source", file=sys.stderr)
+    return svgs
+
+
 def main(argv: list[str]) -> int:
     flags = {a for a in argv if a.startswith("-")}
     args = [a for a in argv if not a.startswith("-")]
@@ -43,14 +63,17 @@ def main(argv: list[str]) -> int:
     want_html = "--html" in flags
     out = Path(args[1]) if len(args) > 1 else src.with_suffix(".html" if want_html else ".pdf")
     text = src.read_text(encoding="utf-8", errors="replace")
+    svgs = mermaid_svgs(text)
 
     if want_html:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(mdcore.build_html(text, src.stem, inline_css=True), encoding="utf-8")
+        out.write_text(
+            mdcore.build_html(text, src.stem, inline_css=True, mermaid_svgs=svgs), encoding="utf-8"
+        )
         print(out)
         return 0
 
-    pages = mdcore.write_pdf(text, out, src.stem, base_dir=src.parent)
+    pages = mdcore.write_pdf(text, out, src.stem, base_dir=src.parent, mermaid_svgs=svgs)
     print(f"{out}  ({pages} pages)")
     return 0
 

@@ -11,6 +11,8 @@ set ``MDEDIT_CSS_SOURCE`` to point at its ``md_to_pdf.py`` if you have one.
 
 from __future__ import annotations
 
+import base64
+import functools
 import os
 import re
 import sys
@@ -24,8 +26,10 @@ PAGE_CSS_FILE = SHARE / "page.css"
 DEFAULT_SOURCE = Path.home() / "projects/personal/pdf_translator/src/tools/md_to_pdf.py"
 SOURCE = Path(os.environ.get("MDEDIT_CSS_SOURCE", DEFAULT_SOURCE))
 
-MD_EXTENSIONS = ["extra", "sane_lists", "admonition", "toc"]
-MD_EXTENSION_CONFIGS = {"toc": {"permalink": False}}
+MERMAID_VERSION = "11.17.2"
+# Installed next to this file by install.sh; a checkout without it uses the CDN.
+MERMAID_JS = SHARE / "mermaid.min.js"
+MERMAID_CDN = f"https://cdn.jsdelivr.net/npm/mermaid@{MERMAID_VERSION}/dist/mermaid.min.js"
 
 HTML_SHELL = """<!DOCTYPE html>
 <html lang="en">
@@ -86,33 +90,96 @@ def load_css() -> tuple[str, str]:
     )
 
 
-def render_body(text: str) -> str:
-    """Markdown text -> HTML fragment (no wrapper element)."""
-    import markdown
+def _is_mermaid(token) -> bool:
+    return token.info.strip().split(maxsplit=1)[:1] == ["mermaid"]
 
-    md = markdown.Markdown(
-        extensions=MD_EXTENSIONS,
-        extension_configs=MD_EXTENSION_CONFIGS,
-        output_format="html5",
+
+@functools.cache
+def _parser():
+    """CommonMark + GFM (tables, task lists, footnotes, alerts, strikethrough),
+    plus definition lists, `!!! note` admonitions and heading ids.
+
+    CommonMark rather than python-markdown because the latter needs a blank line
+    before a list and 4-space nesting, so ordinary Markdown lost its bullets.
+    """
+    from markdown_it import MarkdownIt
+    from mdit_py_plugins.admon import admon_plugin
+    from mdit_py_plugins.anchors import anchors_plugin
+    from mdit_py_plugins.deflist import deflist_plugin
+    from mdit_py_plugins.gfm import gfm_plugin
+
+    md = (
+        MarkdownIt("commonmark")
+        .use(gfm_plugin)
+        .use(deflist_plugin)
+        .use(admon_plugin)
+        .use(anchors_plugin, max_level=6)
     )
-    return md.convert(text)
+    default_fence = md.renderer.rules["fence"]
+
+    def fence(self, tokens, idx, options, env):
+        token = tokens[idx]
+        if _is_mermaid(token):
+            svg = next(env["mermaid_svgs"], None) if "mermaid_svgs" in env else None
+            if svg:
+                return svg_img(svg) + "\n"
+            return f'<pre class="mermaid">{escape(token.content)}</pre>\n'
+        return default_fence(tokens, idx, options, env)
+
+    md.add_render_rule("fence", fence)
+    return md
+
+
+def render_body(text: str, mermaid_svgs: list[str | None] | None = None) -> str:
+    """Markdown text -> HTML fragment (no wrapper element).
+
+    mermaid_svgs (see mermaid_qt.render_svgs) replace the ```mermaid blocks in
+    order; a missing or None entry leaves that block as source.
+    """
+    env = {"mermaid_svgs": iter(mermaid_svgs)} if mermaid_svgs else {}
+    return _parser().render(text, env)
+
+
+def mermaid_sources(text: str) -> list[str]:
+    """Source of every ```mermaid block, in document order."""
+    return [t.content for t in _parser().parse(text) if t.type == "fence" and _is_mermaid(t)]
 
 
 def escape(value: str) -> str:
     return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-def build_html(text: str, title: str, inline_css: bool = False) -> str:
+def svg_img(svg: str) -> str:
+    """Mermaid SVG -> <img> with an explicit width, since its root says width="100%"."""
+    m = re.search(r"max-width:\s*([\d.]+)px", svg)
+    if m:
+        svg = re.sub(r'(<svg[^>]*?)\swidth="100%"', rf'\1 width="{m.group(1)}"', svg, count=1)
+    data = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f'<figure class="mermaid"><img src="data:image/svg+xml;base64,{data}" alt="diagram"></figure>'
+
+
+def build_html(text: str, title: str, inline_css: bool = False, mermaid_svgs: list[str | None] | None = None) -> str:
     """Full HTML document. With inline_css it is standalone and self-contained."""
     style = ""
     if inline_css:
         doc_css, page_css = load_css()
         style = f"<style>\n{page_css}\n{doc_css}\n</style>"
-    return HTML_SHELL.format(title=escape(title), style=style, body=render_body(text))
+    return HTML_SHELL.format(
+        title=escape(title), style=style, body=render_body(text, mermaid_svgs)
+    )
 
 
-def write_pdf(text: str, out_path: str | Path, title: str, base_dir: str | Path = ".") -> int:
-    """Render Markdown text to an A4 PDF. Returns the page count."""
+def write_pdf(
+    text: str,
+    out_path: str | Path,
+    title: str,
+    base_dir: str | Path = ".",
+    mermaid_svgs: list[str | None] | None = None,
+) -> int:
+    """Render Markdown text to an A4 PDF. Returns the page count.
+
+    Without mermaid_svgs the diagrams print as their source.
+    """
     from weasyprint import CSS, HTML
 
     doc_css, page_css = load_css()
@@ -120,7 +187,7 @@ def write_pdf(text: str, out_path: str | Path, title: str, base_dir: str | Path 
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # base_url lets relative images in the Markdown resolve.
-    doc = HTML(string=build_html(text, title), base_url=str(base_dir)).render(
+    doc = HTML(string=build_html(text, title, mermaid_svgs=mermaid_svgs), base_url=str(base_dir)).render(
         stylesheets=[CSS(string=page_css), CSS(string=doc_css)]
     )
     doc.write_pdf(str(out))

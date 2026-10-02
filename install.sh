@@ -27,10 +27,12 @@ if [ "${1:-}" = "--check" ]; then
     [ -x "$BIN/md2pdf" ]      && ok "cli $BIN/md2pdf"        || bad "missing $BIN/md2pdf"
     [ -f "$SHARE/mdcore.py" ] && ok "shared renderer"        || bad "missing mdcore.py"
     [ -f "$SHARE/mdedit.py" ] && ok "editor"                 || bad "missing mdedit.py"
+    [ -f "$SHARE/mermaid.min.js" ] && ok "bundled mermaid.js" \
+        || warn "no bundled mermaid.js: diagrams load from the CDN (needs network)"
     [ -f "$SHARE/doc.css" ] && [ -f "$SHARE/page.css" ] \
         && ok "stylesheets" || bad "missing stylesheets"
-    "$VENV/bin/python" -c 'import markdown, weasyprint' 2>/dev/null \
-        && ok "cli dependencies" || bad "venv broken (markdown/weasyprint)"
+    "$VENV/bin/python" -c 'import markdown_it, mdit_py_plugins.gfm, weasyprint' 2>/dev/null \
+        && ok "cli dependencies" || bad "venv broken (markdown-it-py/mdit-py-plugins/weasyprint)"
     "$VENV/bin/python" -c 'import PyQt6.QtWebEngineWidgets' 2>/dev/null \
         && ok "gui dependencies" || warn "PyQt6 missing: CLI works, editor will not"
     case "$(uname -s)" in
@@ -65,7 +67,7 @@ mkdir -p "$SHARE" "$BIN" "$APPS"
 echo "==> python environment"
 [ -x "$VENV/bin/python" ] || python3 -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
-"$VENV/bin/pip" install --quiet markdown weasyprint
+"$VENV/bin/pip" install --quiet --upgrade "markdown-it-py>=4.1" "mdit-py-plugins>=0.6" weasyprint
 # The editor needs Qt; the CLI does not. Do not fail the whole install if the
 # wheels are unavailable for this platform, just leave the user with md2pdf.
 if ! "$VENV/bin/pip" install --quiet PyQt6 PyQt6-WebEngine; then
@@ -92,10 +94,21 @@ fi
 
 echo "==> files"
 install -m 644 "$REPO_DIR/mdcore.py" "$SHARE/mdcore.py"
+install -m 644 "$REPO_DIR/mermaid_qt.py" "$SHARE/mermaid_qt.py"
 install -m 755 "$REPO_DIR/mdedit.py" "$SHARE/mdedit.py"
 install -m 644 "$REPO_DIR/doc.css"   "$SHARE/doc.css"
 install -m 644 "$REPO_DIR/page.css"  "$SHARE/page.css"
 install -m 755 "$REPO_DIR/install.sh" "$SHARE/install.sh"
+
+# Mermaid is bundled so diagrams render offline. Version is pinned in mdcore.py.
+MERMAID_VERSION=$(sed -n 's/^MERMAID_VERSION = "\(.*\)"/\1/p' "$REPO_DIR/mdcore.py")
+if curl -fsSL -o "$SHARE/mermaid.min.js.part" \
+    "https://cdn.jsdelivr.net/npm/mermaid@$MERMAID_VERSION/dist/mermaid.min.js"; then
+    mv "$SHARE/mermaid.min.js.part" "$SHARE/mermaid.min.js"
+else
+    rm -f "$SHARE/mermaid.min.js.part"
+    echo "   note: could not download mermaid.js; diagrams will load from the CDN"
+fi
 
 # Launchers are generated so the venv/share paths are baked in correctly.
 cat > "$BIN/mdedit" <<EOF
