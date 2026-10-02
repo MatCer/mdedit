@@ -50,6 +50,8 @@ mdedit                 # empty buffer
 md2pdf notes.md        # -> notes.pdf, no GUI
 md2pdf notes.md out.pdf
 md2pdf --html notes.md # standalone HTML
+md2pdf --template=acme notes.md  # use a design template
+md2pdf --templates     # list installed templates
 ```
 
 After install, `.md` files open in mdedit on double-click.
@@ -128,6 +130,39 @@ The CLI does not load Qt at all, so scripted exports stay cheap.
 Edit them in `~/.local/share/md2pdf/`, then hit `Ctrl+R` in the editor or just
 re-run `md2pdf`. The preview derives its page margins from `page.css`, so the two
 cannot drift apart.
+
+### Design templates
+
+The repo ships only the default look. Your own templates live locally, one
+directory each:
+
+```
+~/.config/mdedit/templates/acme/
+    style.css     # layered over the default doc.css + page.css
+    logo.svg      # anything style.css references, by relative url()
+```
+
+A document picks one in its front matter; `md2pdf --template=NAME` overrides it.
+The other keys become hidden `.meta-<key>` elements a template can put into the
+page header or footer, and `title` also sets the PDF title:
+
+```markdown
+---
+template: acme
+title: Quarterly report
+header: Finance / Q3
+footer: Quarterly report | Internal
+---
+```
+
+```css
+/* style.css: show `header:` at the top of every page */
+.markdown-body .meta-header { display: block; position: running(header); }
+@page { @top-left { content: element(header); } }
+```
+
+The editor preview applies the template's typography; page headers and footers
+only exist in the PDF.
 
 PDF rendering is [WeasyPrint](https://weasyprint.org/), so `@page` rules,
 `break-inside`, orphans and widows all work as in a real print stylesheet.

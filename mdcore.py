@@ -26,6 +26,12 @@ PAGE_CSS_FILE = SHARE / "page.css"
 DEFAULT_SOURCE = Path.home() / "projects/personal/pdf_translator/src/tools/md_to_pdf.py"
 SOURCE = Path(os.environ.get("MDEDIT_CSS_SOURCE", DEFAULT_SOURCE))
 
+# Local design templates: <name>/style.css, layered over the default stylesheet.
+# Only the default ships in the repo; a document picks one with `template: <name>`
+# in its front matter.
+TEMPLATES_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "mdedit" / "templates"
+META_KEY = re.compile(r"[A-Za-z][\w-]*")
+
 MERMAID_VERSION = "11.17.2"
 # Installed next to this file by install.sh; a checkout without it uses the CDN.
 MERMAID_JS = SHARE / "mermaid.min.js"
@@ -90,6 +96,54 @@ def load_css() -> tuple[str, str]:
     )
 
 
+def templates() -> list[str]:
+    """Names of the installed templates."""
+    if not TEMPLATES_DIR.is_dir():
+        return []
+    return sorted(d.name for d in TEMPLATES_DIR.iterdir() if (d / "style.css").is_file())
+
+
+def template_path(name: str | None) -> Path | None:
+    """style.css of a template; None for the default. Raises ValueError if unknown."""
+    if not name or name == "default":
+        return None
+    path = TEMPLATES_DIR / name / "style.css"
+    # the name comes from the document, so keep it to one directory level
+    if not re.fullmatch(r"[\w-][\w.-]*", name) or not path.is_file():
+        available = ", ".join(["default", *templates()])
+        raise ValueError(f"unknown template {name!r} (available: {available}; see {TEMPLATES_DIR})")
+    return path
+
+
+def template_css(path: Path) -> str:
+    """A template's CSS for inlining: relative url()s become absolute file URIs,
+    so a logo beside style.css still loads in the preview and HTML export."""
+    def absolute(m: re.Match) -> str:
+        return f'url("{(path.parent / m.group(2)).as_uri()}")'
+
+    css = path.read_text(encoding="utf-8")
+    return re.sub(r"""url\(\s*(['"]?)(?![a-zA-Z][\w+.-]*:|/|#)([^'")]+)\1\s*\)""", absolute, css)
+
+
+def parse_meta(content: str) -> dict[str, str]:
+    """`key: value` lines of a front matter block. Deliberately not full YAML."""
+    meta = {}
+    for line in content.splitlines():
+        key, sep, value = line.partition(":")
+        if sep and META_KEY.fullmatch(key.strip()):
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            meta[key.strip()] = value
+    return meta
+
+
+def front_matter(text: str) -> dict[str, str]:
+    """Front matter of a document, {} if it has none."""
+    tokens = _parser().parse(text)
+    return parse_meta(tokens[0].content) if tokens and tokens[0].type == "front_matter" else {}
+
+
 def _is_mermaid(token) -> bool:
     return token.info.strip().split(maxsplit=1)[:1] == ["mermaid"]
 
@@ -106,6 +160,7 @@ def _parser():
     from mdit_py_plugins.admon import admon_plugin
     from mdit_py_plugins.anchors import anchors_plugin
     from mdit_py_plugins.deflist import deflist_plugin
+    from mdit_py_plugins.front_matter import front_matter_plugin
     from mdit_py_plugins.gfm import gfm_plugin
 
     md = (
@@ -114,6 +169,7 @@ def _parser():
         .use(deflist_plugin)
         .use(admon_plugin)
         .use(anchors_plugin, max_level=6)
+        .use(front_matter_plugin)
     )
     default_fence = md.renderer.rules["fence"]
 
@@ -126,7 +182,23 @@ def _parser():
             return f'<pre class="mermaid">{escape(token.content)}</pre>\n'
         return default_fence(tokens, idx, options, env)
 
+    def meta(self, tokens, idx, options, env):
+        # Hidden by default; a template can show one, e.g. as a running page header.
+        return "".join(
+            f'<div class="meta meta-{key}">{escape(value)}</div>\n'
+            for key, value in parse_meta(tokens[idx].content).items()
+        )
+
+    def ordered_list_open(self, tokens, idx, options, env):
+        # WeasyPrint ignores <ol start>; a counter-reset says the same thing to it.
+        start = tokens[idx].attrGet("start")
+        if start is not None:
+            tokens[idx].attrSet("style", f"counter-reset: list-item {int(start) - 1}")
+        return self.renderToken(tokens, idx, options, env)
+
     md.add_render_rule("fence", fence)
+    md.add_render_rule("ordered_list_open", ordered_list_open)
+    md.add_render_rule("front_matter", meta)
     return md
 
 
@@ -158,14 +230,27 @@ def svg_img(svg: str) -> str:
     return f'<figure class="mermaid"><img src="data:image/svg+xml;base64,{data}" alt="diagram"></figure>'
 
 
-def build_html(text: str, title: str, inline_css: bool = False, mermaid_svgs: list[str | None] | None = None) -> str:
+def resolve_template(text: str, template: str | None = None) -> Path | None:
+    """An explicit template wins over the document's `template:` front matter."""
+    return template_path(template or front_matter(text).get("template"))
+
+
+def build_html(
+    text: str,
+    title: str,
+    inline_css: bool = False,
+    mermaid_svgs: list[str | None] | None = None,
+    template: str | None = None,
+) -> str:
     """Full HTML document. With inline_css it is standalone and self-contained."""
     style = ""
     if inline_css:
         doc_css, page_css = load_css()
-        style = f"<style>\n{page_css}\n{doc_css}\n</style>"
+        tpl = resolve_template(text, template)
+        tpl_css = template_css(tpl) if tpl else ""
+        style = f"<style>\n{page_css}\n{doc_css}\n{tpl_css}\n</style>"
     return HTML_SHELL.format(
-        title=escape(title), style=style, body=render_body(text, mermaid_svgs)
+        title=escape(front_matter(text).get("title", title)), style=style, body=render_body(text, mermaid_svgs)
     )
 
 
@@ -175,20 +260,27 @@ def write_pdf(
     title: str,
     base_dir: str | Path = ".",
     mermaid_svgs: list[str | None] | None = None,
+    template: str | None = None,
 ) -> int:
     """Render Markdown text to an A4 PDF. Returns the page count.
 
-    Without mermaid_svgs the diagrams print as their source.
+    Without mermaid_svgs the diagrams print as their source. template overrides
+    the document's front matter; an unknown one raises ValueError.
     """
     from weasyprint import CSS, HTML
 
     doc_css, page_css = load_css()
+    tpl = resolve_template(text, template)
+    stylesheets = [CSS(string=page_css), CSS(string=doc_css)]
+    if tpl:
+        # loaded by filename so url(logo.png) resolves inside the template dir
+        stylesheets.append(CSS(filename=str(tpl)))
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
     # base_url lets relative images in the Markdown resolve.
     doc = HTML(string=build_html(text, title, mermaid_svgs=mermaid_svgs), base_url=str(base_dir)).render(
-        stylesheets=[CSS(string=page_css), CSS(string=doc_css)]
+        stylesheets=stylesheets
     )
     doc.write_pdf(str(out))
     return len(doc.pages)

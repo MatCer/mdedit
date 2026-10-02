@@ -63,6 +63,7 @@ body {{ margin: 0; padding: 22px 0 40px; }}
     font-size: {font_size};
 }}
 {doc_css}
+.markdown-body .meta {{ display: none !important; }}
 {mode_css}
 {dark_css}
 </style>
@@ -167,15 +168,16 @@ def page_geometry(page_css: str) -> tuple[str, str]:
     page matches the PDF instead of hardcoding a second copy of the numbers."""
     margin = "20mm 18mm"
     font_size = "11pt"
-    block = re.search(r"@page\s*\{(.*?)\n\}", page_css, re.S)
-    if block:
-        m = re.search(r"margin:\s*([^;]+);", block.group(1))
+    # drop margin boxes (@top-left {...}) so their own margins are not mistaken
+    # for the page's; then the last @page with a margin wins, as in the cascade
+    page_css = re.sub(r"@(?:top|bottom|left|right)[\w-]*\s*\{[^{}]*\}", "", page_css)
+    for block in re.findall(r"@page[^{]*\{([^{}]*)\}", page_css):
+        m = re.search(r"(?:^|[;\s])margin:\s*([^;}]+)", block)
         if m:
             # drop the bottom margin: the preview scrolls as one continuous page
             parts = m.group(1).split()
             margin = " ".join(parts[:2]) if len(parts) >= 4 else m.group(1).strip()
-    m = re.search(r"html\s*\{[^}]*font-size:\s*([^;]+);", page_css)
-    if m:
+    for m in re.finditer(r"html\s*\{[^}]*font-size:\s*([^;]+);", page_css):
         font_size = m.group(1).strip()
     return margin, font_size
 
@@ -186,7 +188,6 @@ class Editor(QMainWindow):
         self.path: Path | None = None
         self.settings = QSettings("matcer", "mdedit")
         self.doc_css, self.page_css = mdcore.load_css()
-        self.margin, self.font_size = page_geometry(self.page_css)
 
         self.edit = QPlainTextEdit()
         self.edit.setFont(QFont("JetBrains Mono", 11))
@@ -385,6 +386,13 @@ class Editor(QMainWindow):
         except Exception as exc:  # keep the last good preview on error
             self.statusBar().showMessage(f"render error: {exc}", 4000)
             return
+        note = ""
+        try:
+            tpl = mdcore.resolve_template(text)
+            tpl_css = mdcore.template_css(tpl) if tpl else ""
+        except (ValueError, OSError) as exc:  # half-typed name, unreadable file: use the default
+            tpl_css, note = "", f"template: {exc} · "
+        margin, font_size = page_geometry(self.page_css + tpl_css)
         plain = self.tabs.currentIndex() == MARKDOWN_TAB
         mermaid_config = {
             "startOnLoad": False,
@@ -393,10 +401,10 @@ class Editor(QMainWindow):
             **({} if plain else {"htmlLabels": False, "flowchart": {"htmlLabels": False}}),
         }
         html = PREVIEW_SHELL.format(
-            doc_css=self.doc_css,
+            doc_css=self.doc_css + tpl_css,
             body=body,
-            margin=self.margin,
-            font_size=self.font_size,
+            margin=margin,
+            font_size=font_size,
             mode_css=PLAIN_CSS if plain else "",
             dark_css=(DARK_CSS + (PLAIN_DARK_CSS if plain else "")) if self.dark else "",
             backdrop="#1b1b1b" if self.dark else "#6b6b6b",
@@ -406,12 +414,11 @@ class Editor(QMainWindow):
         base = QUrl.fromLocalFile(str((self.path or Path.cwd()).parent) + "/")
         self.view.setHtml(html, base)
         words = len(text.split())
-        self.statusBar().showMessage(f"{words} words · {len(text)} chars")
+        self.statusBar().showMessage(f"{note}{words} words · {len(text)} chars")
 
     def reload_css(self) -> None:
         mdcore.sync_css(quiet=True)
         self.doc_css, self.page_css = mdcore.load_css()
-        self.margin, self.font_size = page_geometry(self.page_css)
         self.render()
         self.statusBar().showMessage("stylesheet reloaded", 3000)
 
