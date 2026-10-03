@@ -47,6 +47,7 @@ installer vendors automatically on Debian/Ubuntu if your system lacks it.
 ```sh
 mdedit notes.md        # editor with live preview
 mdedit                 # empty buffer
+mdedit ~/notes/        # folder in the sidebar
 md2pdf notes.md        # -> notes.pdf, no GUI
 md2pdf notes.md out.pdf
 md2pdf --html notes.md # standalone HTML
@@ -61,6 +62,7 @@ After install, `.md` files open in mdedit on double-click.
 | | |
 |---|---|
 | `Ctrl+S` / `Ctrl+O` / `Ctrl+N` | save / open / new |
+| `Ctrl+Shift+O` / `Ctrl+B` | open folder / toggle sidebar |
 | `Ctrl+E` | export PDF |
 | `Ctrl+Shift+E` | export HTML |
 | `Ctrl+P` | toggle preview pane |
@@ -75,7 +77,10 @@ The preview has two tabs. **Markdown** (the default) is a plain readable
 render. **PDF** is the real exported PDF, rendered in the background as you
 type: A4 page breaks, template headers, footers and page numbers included.
 
-The editor remembers window size and position, maximized/fullscreen state, the
+`File > Open Folder` shows a sidebar with the folder's Markdown files; click one
+to open it. Unsaved changes prompt before switching.
+
+The editor remembers the open folder, window size and position, maximized/fullscreen state, the
 split ratio, preview zoom and the dark toggle.
 
 Dark preview only affects the screen. Exported PDFs are always the light

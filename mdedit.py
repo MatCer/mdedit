@@ -5,7 +5,7 @@ The preview and the exported PDF both use the stylesheet from the
 pdf_translator "md-to-pdf" tool, so what you see is what you get.
 
 usage:
-    mdedit [file.md]
+    mdedit [file.md | folder]
 
 shortcuts:
     Ctrl+S    save            Ctrl+O    open
@@ -13,6 +13,7 @@ shortcuts:
     Ctrl+P    toggle preview  Ctrl+Q    quit
     Ctrl+D    dark preview    F11       fullscreen
     Ctrl+1/2  Markdown / PDF preview tab
+    Ctrl+Shift+O  open folder   Ctrl+B  toggle sidebar
     F5        refresh preview
 """
 
@@ -26,12 +27,13 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer, QUrl, QSettings, QSize, pyqtSignal
-from PyQt6.QtGui import QAction, QFont, QKeySequence, QTextOption
+from PyQt6.QtGui import QAction, QFileSystemModel, QFont, QKeySequence, QTextOption
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtPdfWidgets import QPdfView
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QApplication,
+    QDockWidget,
     QFileDialog,
     QMainWindow,
     QMenu,
@@ -44,6 +46,7 @@ from PyQt6.QtWidgets import (
     QTabBar,
     QToolBar,
     QToolButton,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -103,6 +106,7 @@ html { background: #2b2e33; }
 """
 
 MARKDOWN_TAB, PDF_TAB = 0, 1
+MD_GLOBS = ["*.md", "*.markdown", "*.mdown"]
 
 # Dark preview is a viewing aid only: it never touches the exported PDF.
 # Rather than inverting the page (which turns white into harsh black), this is a
@@ -251,10 +255,20 @@ class Editor(QMainWindow):
 
         self.dark = self.settings.value("darkPreview", False, type=bool)
 
+        self._build_sidebar()
         self._build_menu()
         self._build_toolbar()
         self.restore_session()
 
+        # the dock's visibility comes from restoreState(); `mdedit somedir` forces it open
+        folder = self.settings.value("folder", "", type=str)
+        if path and Path(path).is_dir():
+            folder, path = path, None
+            self.dock.show()
+        if folder and Path(folder).is_dir():
+            self.set_folder(Path(folder))
+        else:
+            self.dock.hide()  # an unrooted tree would list the whole filesystem
         if path:
             self.load(Path(path))
         else:
@@ -312,6 +326,50 @@ class Editor(QMainWindow):
         self.settings.setValue("previewZoom", self.view.zoomFactor())
         self.settings.setValue("darkPreview", self.dark)
 
+    # ── sidebar ─────────────────────────────────────────────────────────
+    def _build_sidebar(self) -> None:
+        """Folder tree showing only Markdown files; a click opens the file."""
+        self.fs = QFileSystemModel(self)
+        self.fs.setNameFilters(MD_GLOBS)
+        self.fs.setNameFilterDisables(False)  # hide non-matching files, not grey them out
+        self.tree = QTreeView()
+        self.tree.setModel(self.fs)
+        self.tree.setHeaderHidden(True)
+        for col in (1, 2, 3):  # size, type, date
+            self.tree.hideColumn(col)
+        self.tree.clicked.connect(self.open_index)
+        self.tree.activated.connect(self.open_index)  # Enter key
+        self.dock = QDockWidget("Files", self)
+        self.dock.setObjectName("FilesDock")  # required for saveState/restoreState
+        self.dock.setWidget(self.tree)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock)
+        self.dock.hide()
+
+    def set_folder(self, folder: Path) -> None:
+        self.fs.setRootPath(str(folder))
+        self.tree.setRootIndex(self.fs.index(str(folder)))
+        self.dock.setWindowTitle(folder.name or str(folder))
+        self.settings.setValue("folder", str(folder))
+
+    def open_folder(self) -> None:
+        start = self.fs.rootPath() or (str(self.path.parent) if self.path else str(Path.home()))
+        name = QFileDialog.getExistingDirectory(self, "Open Folder", start)
+        if name:
+            self.set_folder(Path(name))
+            self.dock.show()
+
+    def open_index(self, index) -> None:
+        if self.fs.isDir(index):
+            return
+        path = Path(self.fs.filePath(index))
+        if path != self.path and self.maybe_save():
+            self.load(path)
+        self.select_current()  # undo the highlight if the switch was cancelled
+
+    def select_current(self) -> None:
+        if self.path and self.fs.rootPath():
+            self.tree.setCurrentIndex(self.fs.index(str(self.path)))
+
     # ── menu ────────────────────────────────────────────────────────────
     def _build_menu(self) -> None:
         def act(name, shortcut, slot, menu):
@@ -326,6 +384,7 @@ class Editor(QMainWindow):
         f = m.addMenu("&File")
         act("&New", "Ctrl+N", self.new_file, f)
         act("&Open...", "Ctrl+O", self.open_file, f)
+        act("Open &Folder...", "Ctrl+Shift+O", self.open_folder, f)
         act("&Save", "Ctrl+S", self.save, f)
         act("Save &As...", "Ctrl+Shift+S", self.save_as, f)
         f.addSeparator()
@@ -336,6 +395,11 @@ class Editor(QMainWindow):
 
         v = m.addMenu("&View")
         act("Toggle &Preview", "Ctrl+P", self.toggle_preview, v)
+        sidebar = self.dock.toggleViewAction()
+        sidebar.setText("Toggle &Sidebar")
+        sidebar.setShortcut(QKeySequence("Ctrl+B"))
+        v.addAction(sidebar)
+        self.addAction(sidebar)
         act("&Refresh", "F5", self.render, v)
         act("&Markdown Preview", "Ctrl+1", lambda: self.tabs.setCurrentIndex(MARKDOWN_TAB), v)
         act("P&DF Preview", "Ctrl+2", lambda: self.tabs.setCurrentIndex(PDF_TAB), v)
@@ -577,6 +641,8 @@ class Editor(QMainWindow):
         self.setWindowTitle(f"{dirty}{name} - mdedit")
 
     def new_file(self) -> None:
+        if not self.maybe_save():
+            return
         self.path = None
         self.edit.setPlainText("# Untitled\n\n")
         self.edit.document().setModified(False)
@@ -608,13 +674,14 @@ class Editor(QMainWindow):
         self.edit.document().setModified(False)
         self.update_title()
         self.render()
+        self.select_current()
 
     def open_file(self) -> None:
         start = str(self.path.parent) if self.path else str(Path.home())
         name, _ = QFileDialog.getOpenFileName(
             self, "Open Markdown", start, "Markdown (*.md *.markdown *.mdown *.txt);;All files (*)"
         )
-        if name:
+        if name and self.maybe_save():
             self.load(Path(name))
 
     def save(self) -> bool:
@@ -674,24 +741,28 @@ class Editor(QMainWindow):
             return
         self.statusBar().showMessage(f"exported {name}", 4000)
 
+    def maybe_save(self) -> bool:
+        """Ask about unsaved changes; False means the user cancelled (or save failed)."""
+        if not self.edit.document().isModified():
+            return True
+        r = QMessageBox.question(
+            self,
+            "Unsaved changes",
+            f"Save changes to {self.path.name if self.path else 'untitled.md'}?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if r == QMessageBox.StandardButton.Cancel:
+            return False
+        return r == QMessageBox.StandardButton.Discard or self.save()
+
     def closeEvent(self, event) -> None:
         self.save_session()
-        if self.edit.document().isModified():
-            r = QMessageBox.question(
-                self,
-                "Unsaved changes",
-                f"Save changes to {self.path.name if self.path else 'untitled.md'}?",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-            )
-            if r == QMessageBox.StandardButton.Cancel:
-                event.ignore()
-                return
-            if r == QMessageBox.StandardButton.Save and not self.save():
-                event.ignore()
-                return
-        event.accept()
+        if self.maybe_save():
+            event.accept()
+        else:
+            event.ignore()
 
 
 def main() -> int:
