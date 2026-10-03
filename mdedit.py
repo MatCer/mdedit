@@ -26,15 +26,18 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QUrl, QSettings, QSize, pyqtSignal
+from PyQt6.QtCore import QFile, Qt, QTimer, QUrl, QSettings, QSize, pyqtSignal
 from PyQt6.QtGui import QAction, QFileSystemModel, QFont, QKeySequence, QTextOption
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtPdfWidgets import QPdfView
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDockWidget,
     QFileDialog,
+    QHBoxLayout,
+    QInputDialog,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -107,6 +110,34 @@ html { background: #2b2e33; }
 
 MARKDOWN_TAB, PDF_TAB = 0, 1
 MD_GLOBS = ["*.md", "*.markdown", "*.mdown"]
+
+
+class FolderModel(QFileSystemModel):
+    """QFileSystemModel whose drops move files inside the open folder only.
+
+    The stock drop moves anything dropped from anywhere and does not say what
+    moved, so the editor could not follow its open file. Drops from outside the
+    folder are refused rather than silently pulling files in from elsewhere.
+    """
+
+    moved = pyqtSignal(str, str)
+
+    def dropMimeData(self, data, action, row, column, parent) -> bool:
+        dest = Path(self.filePath(parent)) if parent.isValid() else Path(self.rootPath())
+        if not dest.is_dir():
+            dest = dest.parent
+        root = Path(self.rootPath())
+        for url in data.urls():
+            src = Path(url.toLocalFile())
+            target = dest / src.name
+            if root not in src.parents or src == dest or src in dest.parents or target.exists():
+                continue  # outside the folder, into itself, or would overwrite
+            try:
+                src.rename(target)
+            except OSError:
+                continue
+            self.moved.emit(str(src), str(target))
+        return True
 
 # Dark preview is a viewing aid only: it never touches the exported PDF.
 # Rather than inverting the page (which turns white into harsh black), this is a
@@ -328,28 +359,88 @@ class Editor(QMainWindow):
 
     # ── sidebar ─────────────────────────────────────────────────────────
     def _build_sidebar(self) -> None:
-        """Folder tree showing only Markdown files; a click opens the file."""
-        self.fs = QFileSystemModel(self)
+        """Project picker over a folder tree of Markdown files; a click opens the file.
+
+        Right-click creates, renames and trashes; dragging moves within the folder.
+        """
+        self.fs = FolderModel(self)
         self.fs.setNameFilters(MD_GLOBS)
         self.fs.setNameFilterDisables(False)  # hide non-matching files, not grey them out
+        self.fs.setReadOnly(False)  # inline rename and drag-and-drop moves
+        self.fs.fileRenamed.connect(
+            lambda d, old, new: self.path_moved(Path(d) / old, Path(d) / new)
+        )
+        self.fs.moved.connect(lambda old, new: self.path_moved(Path(old), Path(new)))
         self.tree = QTreeView()
         self.tree.setModel(self.fs)
         self.tree.setHeaderHidden(True)
         for col in (1, 2, 3):  # size, type, date
             self.tree.hideColumn(col)
+        self.tree.setEditTriggers(QTreeView.EditTrigger.EditKeyPressed)  # F2, not double-click
+        self.tree.setDragDropMode(QTreeView.DragDropMode.InternalMove)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.tree_menu)
         self.tree.clicked.connect(self.open_index)
         self.tree.activated.connect(self.open_index)  # Enter key
+        delete = QAction("Move to Trash", self.tree)
+        delete.setShortcut(QKeySequence.StandardKey.Delete)
+        delete.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        delete.triggered.connect(lambda: self.trash(self.tree.currentIndex()))
+        self.tree.addAction(delete)
+
+        self.projects = QComboBox()
+        self.projects.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.projects.setToolTip("Recent projects")
+        self.projects.activated.connect(
+            lambda i: self.set_folder(Path(self.projects.itemData(i)))
+        )
+        add = QToolButton(text="+", toolTip="Open folder as project (Ctrl+Shift+O)")
+        add.clicked.connect(self.open_folder)
+        forget = QToolButton(text="−", toolTip="Remove this project from the list")
+        forget.clicked.connect(self.forget_project)
+        head = QHBoxLayout()
+        head.setContentsMargins(4, 4, 4, 0)
+        for w in (self.projects, add, forget):
+            head.addWidget(w)
+        panel = QWidget()
+        box = QVBoxLayout(panel)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.addLayout(head)
+        box.addWidget(self.tree)
+
         self.dock = QDockWidget("Files", self)
         self.dock.setObjectName("FilesDock")  # required for saveState/restoreState
-        self.dock.setWidget(self.tree)
+        self.dock.setWidget(panel)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock)
         self.dock.hide()
+
+    def project_list(self) -> list[str]:
+        saved = self.settings.value("projects", [], type=list)
+        return [p for p in saved if Path(p).is_dir()]
 
     def set_folder(self, folder: Path) -> None:
         self.fs.setRootPath(str(folder))
         self.tree.setRootIndex(self.fs.index(str(folder)))
         self.dock.setWindowTitle(folder.name or str(folder))
         self.settings.setValue("folder", str(folder))
+        # most recent first
+        projects = [str(folder)] + [p for p in self.project_list() if p != str(folder)]
+        self.settings.setValue("projects", projects[:20])
+        self.fill_projects()
+
+    def fill_projects(self) -> None:
+        self.projects.clear()
+        for p in self.project_list():
+            self.projects.addItem(Path(p).name or p, p)
+            self.projects.setItemData(self.projects.count() - 1, p, Qt.ItemDataRole.ToolTipRole)
+        self.projects.setCurrentIndex(self.projects.findData(self.fs.rootPath()))
+
+    def forget_project(self) -> None:
+        current = self.projects.currentData()
+        if current:
+            self.settings.setValue("projects", [p for p in self.project_list() if p != current])
+            self.fill_projects()
+            self.projects.setCurrentIndex(-1)
 
     def open_folder(self) -> None:
         start = self.fs.rootPath() or (str(self.path.parent) if self.path else str(Path.home()))
@@ -369,6 +460,66 @@ class Editor(QMainWindow):
     def select_current(self) -> None:
         if self.path and self.fs.rootPath():
             self.tree.setCurrentIndex(self.fs.index(str(self.path)))
+
+    def path_moved(self, old: Path, new: Path) -> None:
+        """Keep the open buffer pointing at its file after a rename or move."""
+        if self.path and (self.path == old or old in self.path.parents):
+            self.path = new / self.path.relative_to(old)
+            self.update_title()
+
+    def tree_menu(self, pos) -> None:
+        index = self.tree.indexAt(pos)
+        if not self.fs.rootPath():
+            return
+        target = Path(self.fs.filePath(index)) if index.isValid() else Path(self.fs.rootPath())
+        parent = target if target.is_dir() else target.parent
+        menu = QMenu(self)
+        menu.addAction("New File...", lambda: self.new_in(parent, folder=False))
+        menu.addAction("New Folder...", lambda: self.new_in(parent, folder=True))
+        if index.isValid():
+            menu.addSeparator()
+            menu.addAction("Rename\tF2", lambda: self.tree.edit(index))
+            menu.addAction("Move to Trash\tDel", lambda: self.trash(index))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+
+    def new_in(self, parent: Path, folder: bool) -> None:
+        kind = "Folder" if folder else "File"
+        name, ok = QInputDialog.getText(self, f"New {kind}", f"{kind} name in {parent.name}/:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if Path(name).name != name or name in (".", ".."):
+            QMessageBox.warning(self, f"New {kind}", f"Invalid name: {name}")
+            return
+        if not folder and not Path(name).suffix:
+            name += ".md"
+        path = parent / name
+        try:
+            if folder:
+                path.mkdir()
+            else:
+                with path.open("x", encoding="utf-8") as f:  # "x": never clobber
+                    f.write(f"# {path.stem}\n\n")
+        except OSError as exc:
+            QMessageBox.critical(self, f"New {kind}", f"{path}\n\n{exc}")
+            return
+        if not folder and self.maybe_save():
+            self.load(path)
+
+    def trash(self, index) -> None:
+        if not index.isValid():
+            return
+        path = Path(self.fs.filePath(index))
+        if QMessageBox.question(self, "Move to Trash", f"Move {path.name} to the trash?") \
+                != QMessageBox.StandardButton.Yes:
+            return
+        ok, _ = QFile.moveToTrash(str(path))
+        if not ok:
+            QMessageBox.critical(self, "Move to Trash", f"Could not move {path} to the trash.")
+            return
+        if self.path and (self.path == path or path in self.path.parents):
+            self.edit.document().setModified(False)  # the file is recoverable from the trash
+            self.new_file()
 
     # ── menu ────────────────────────────────────────────────────────────
     def _build_menu(self) -> None:

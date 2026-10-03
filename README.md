@@ -78,7 +78,10 @@ render. **PDF** is the real exported PDF, rendered in the background as you
 type: A4 page breaks, template headers, footers and page numbers included.
 
 `File > Open Folder` shows a sidebar with the folder's Markdown files; click one
-to open it. Unsaved changes prompt before switching.
+to open it. Unsaved changes prompt before switching. Right-click for new
+file/folder, rename (`F2`) and move to trash (`Del`); drag files onto a
+subfolder to move them. Opened folders are kept as projects in the dropdown at
+the top of the sidebar (`+` adds one, `−` removes it from the list).
 
 The editor remembers the open folder, window size and position, maximized/fullscreen state, the
 split ratio, preview zoom and the dark toggle.
