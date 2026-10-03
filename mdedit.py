@@ -21,10 +21,14 @@ from __future__ import annotations
 import json
 import re
 import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer, QUrl, QSettings, QSize
+from PyQt6.QtCore import Qt, QTimer, QUrl, QSettings, QSize, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QKeySequence, QTextOption
+from PyQt6.QtPdf import QPdfDocument
+from PyQt6.QtPdfWidgets import QPdfView
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QApplication,
@@ -35,6 +39,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QStatusBar,
     QTabBar,
     QToolBar,
@@ -183,6 +188,9 @@ def page_geometry(page_css: str) -> tuple[str, str]:
 
 
 class Editor(QMainWindow):
+    # (generation, pdf path or None, page count or error message), from the worker thread
+    pdf_ready = pyqtSignal(int, object, object)
+
     def __init__(self, path: str | None = None):
         super().__init__()
         self.path: Path | None = None
@@ -209,7 +217,25 @@ class Editor(QMainWindow):
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(0)
         box.addWidget(self.tabs)
-        box.addWidget(self.view)
+        # PDF tab: the real WeasyPrint output, so page breaks, @page headers
+        # and footers look exactly like the export.
+        self.pdf_doc = QPdfDocument(self)
+        self.pdf_view = QPdfView(None)
+        self.pdf_view.setDocument(self.pdf_doc)
+        self.pdf_view.setPageMode(QPdfView.PageMode.MultiPage)
+        self.pdf_view.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+        self.pdf_view.setPageSpacing(16)
+        self.pdf_pool = ThreadPoolExecutor(max_workers=1)
+        self.pdf_dir = tempfile.TemporaryDirectory(prefix="mdedit-")
+        self.pdf_gen = 0  # bumped per request; stale results are dropped
+        self.pdf_busy = False
+        self.pdf_again = False  # text changed while a render was running
+        self.pdf_ready.connect(self.show_pdf)
+        self._mermaid_cache: tuple[list[str], list[str | None]] = ([], [])
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.view)
+        self.stack.addWidget(self.pdf_view)
+        box.addWidget(self.stack)
 
         self.split = QSplitter(Qt.Orientation.Horizontal)
         self.split.addWidget(self.edit)
@@ -380,6 +406,11 @@ class Editor(QMainWindow):
         self.update_title()
 
     def render(self) -> None:
+        if self.tabs.currentIndex() == PDF_TAB:
+            self.stack.setCurrentWidget(self.pdf_view)
+            self.render_pdf()
+            return
+        self.stack.setCurrentWidget(self.view)
         text = self.edit.toPlainText()
         try:
             body = mdcore.render_body(text)
@@ -393,20 +424,14 @@ class Editor(QMainWindow):
         except (ValueError, OSError) as exc:  # half-typed name, unreadable file: use the default
             tpl_css, note = "", f"template: {exc} · "
         margin, font_size = page_geometry(self.page_css + tpl_css)
-        plain = self.tabs.currentIndex() == MARKDOWN_TAB
-        mermaid_config = {
-            "startOnLoad": False,
-            "theme": "dark" if self.dark else "default",
-            # The PDF tab draws labels the way the export does (see mermaid_qt).
-            **({} if plain else {"htmlLabels": False, "flowchart": {"htmlLabels": False}}),
-        }
+        mermaid_config = {"startOnLoad": False, "theme": "dark" if self.dark else "default"}
         html = PREVIEW_SHELL.format(
             doc_css=self.doc_css + tpl_css,
             body=body,
             margin=margin,
             font_size=font_size,
-            mode_css=PLAIN_CSS if plain else "",
-            dark_css=(DARK_CSS + (PLAIN_DARK_CSS if plain else "")) if self.dark else "",
+            mode_css=PLAIN_CSS,
+            dark_css=DARK_CSS + PLAIN_DARK_CSS if self.dark else "",
             backdrop="#1b1b1b" if self.dark else "#6b6b6b",
             mermaid_js=mermaid_qt.mermaid_script_url(),
             mermaid_config=json.dumps(mermaid_config),
@@ -415,6 +440,58 @@ class Editor(QMainWindow):
         self.view.setHtml(html, base)
         words = len(text.split())
         self.statusBar().showMessage(f"{note}{words} words · {len(text)} chars")
+
+    def mermaid_svgs(self, text: str) -> list[str | None]:
+        """Diagrams for the PDF tab, redrawn only when a mermaid block changed."""
+        sources = mdcore.mermaid_sources(text)
+        if sources != self._mermaid_cache[0]:
+            try:
+                svgs = mermaid_qt.render_svgs(sources)
+            except TimeoutError:
+                svgs = [None] * len(sources)
+            self._mermaid_cache = (sources, svgs)
+        return self._mermaid_cache[1]
+
+    def render_pdf(self) -> None:
+        """Render the PDF off the UI thread; at most one job runs, the latest text wins."""
+        if self.pdf_busy:
+            self.pdf_again = True
+            return
+        self.pdf_busy, self.pdf_again = True, False
+        self.pdf_gen += 1
+        gen, text = self.pdf_gen, self.edit.toPlainText()
+        out = Path(self.pdf_dir.name) / f"preview-{gen}.pdf"
+        base = self.path.parent if self.path else Path.cwd()
+        title = self.path.stem if self.path else "untitled"
+        svgs = self.mermaid_svgs(text)  # Qt: must stay on this thread
+
+        def job() -> None:
+            try:
+                pages = mdcore.write_pdf(text, out, title, base, mermaid_svgs=svgs)
+                self.pdf_ready.emit(gen, out, pages)
+            except Exception as exc:  # half-typed template name, bad CSS, ...
+                self.pdf_ready.emit(gen, None, str(exc))
+
+        self.pdf_pool.submit(job)
+
+    def show_pdf(self, gen: int, out: Path | None, info: object) -> None:
+        self.pdf_busy = False
+        if out is None:
+            self.statusBar().showMessage(f"PDF preview: {info}", 6000)
+        else:
+            # swapping the document resets the view, so keep the reading position
+            bar = self.pdf_view.verticalScrollBar()
+            pos = bar.value()
+            old = self.pdf_doc.status() == QPdfDocument.Status.Ready
+            self.pdf_doc.load(str(out))
+            if old:
+                QTimer.singleShot(0, lambda: bar.setValue(pos))
+            for stale in Path(self.pdf_dir.name).glob("preview-*.pdf"):
+                if stale != out:
+                    stale.unlink(missing_ok=True)
+            self.statusBar().showMessage(f"{info} pages", 3000)
+        if self.pdf_again and self.tabs.currentIndex() == PDF_TAB:
+            self.render_pdf()
 
     def reload_css(self) -> None:
         mdcore.sync_css(quiet=True)
@@ -440,6 +517,15 @@ class Editor(QMainWindow):
         self.dark_action.setChecked(self.dark)
 
     def zoom(self, direction: int) -> None:
+        if self.tabs.currentIndex() == PDF_TAB:
+            v = self.pdf_view
+            if direction == 0:
+                v.setZoomMode(QPdfView.ZoomMode.FitToWidth)
+            else:
+                f = v.zoomFactor()
+                v.setZoomMode(QPdfView.ZoomMode.Custom)
+                v.setZoomFactor(max(0.3, min(5.0, f + 0.1 * direction)))
+            return
         f = self.view.zoomFactor()
         self.view.setZoomFactor(1.0 if direction == 0 else max(0.3, min(5.0, f + 0.1 * direction)))
 

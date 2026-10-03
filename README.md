@@ -72,7 +72,8 @@ After install, `.md` files open in mdedit on double-click.
 | `Ctrl+R` | reload stylesheet |
 
 The preview has two tabs. **Markdown** (the default) is a plain readable
-render. **PDF** shows the A4 page exactly as it will be exported.
+render. **PDF** is the real exported PDF, rendered in the background as you
+type: A4 page breaks, template headers, footers and page numbers included.
 
 The editor remembers window size and position, maximized/fullscreen state, the
 split ratio, preview zoom and the dark toggle.
@@ -161,8 +162,8 @@ footer: Quarterly report | Internal
 @page { @top-left { content: element(header); } }
 ```
 
-The editor preview applies the template's typography; page headers and footers
-only exist in the PDF.
+The Markdown tab applies the template's typography; page headers and footers
+show in the PDF tab and the export.
 
 PDF rendering is [WeasyPrint](https://weasyprint.org/), so `@page` rules,
 `break-inside`, orphans and widows all work as in a real print stylesheet.
