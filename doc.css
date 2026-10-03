@@ -158,3 +158,6 @@
 
 /* Explicit page break: `<div class="page-break"></div>` in the Markdown */
 .markdown-body .page-break { break-after: page; }
+
+/* front matter, rendered as .meta-<key> elements; templates may show them */
+.markdown-body .meta { display: none; }
