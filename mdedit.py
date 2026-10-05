@@ -23,11 +23,12 @@ import json
 import re
 import sys
 import tempfile
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from PyQt6.QtCore import QFile, Qt, QTimer, QUrl, QSettings, QSize, pyqtSignal
-from PyQt6.QtGui import QAction, QFileSystemModel, QFont, QKeySequence, QTextOption
+from PyQt6.QtGui import QAction, QActionGroup, QFileSystemModel, QFont, QKeySequence, QTextCursor, QTextOption
 from PyQt6.QtPdf import QPdfDocument
 from PyQt6.QtPdfWidgets import QPdfView
 from PyQt6.QtWebEngineWidgets import QWebEngineView
@@ -600,6 +601,17 @@ class Editor(QMainWindow):
         self.export_button.clicked.connect(self.export_pdf)
         bar.addWidget(self.export_button)
 
+        # Lists installed templates; picking one writes `template:` into the
+        # front matter, or adds a title/header/footer skeleton if there is none.
+        self.template_menu = QMenu(self)
+        self.template_menu.aboutToShow.connect(self.fill_template_menu)
+        template_button = QToolButton(self)
+        template_button.setText("Template ")
+        template_button.setToolTip("Pick a design template for this document")
+        template_button.setMenu(self.template_menu)
+        template_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        bar.addWidget(template_button)
+
         spacer = QWidget(self)
         spacer.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
@@ -614,6 +626,29 @@ class Editor(QMainWindow):
         bar.addWidget(self.dark_button)
 
         self.sync_dark_ui()
+
+    def fill_template_menu(self) -> None:
+        self.template_menu.clear()
+        try:
+            current = mdcore.front_matter(self.edit.toPlainText()).get("template", "default")
+        except Exception:  # unparsable text; just show nothing as current
+            current = None
+        group = QActionGroup(self.template_menu)
+        for name in ["default", *mdcore.templates()]:
+            a = self.template_menu.addAction(name, lambda n=name: self.apply_template(n))
+            a.setCheckable(True)
+            a.setChecked(name == current)
+            group.addAction(a)
+
+    def apply_template(self, name: str) -> None:
+        d = date.today()
+        text = mdcore.set_template(self.edit.toPlainText(), name, f"{d.day} {d:%B %Y}")
+        cursor = self.edit.textCursor()
+        pos = cursor.position()
+        cursor.select(QTextCursor.SelectionType.Document)
+        cursor.insertText(text)  # one undo step, unlike setPlainText
+        cursor.setPosition(min(pos, len(text)))
+        self.edit.setTextCursor(cursor)
 
     # ── rendering ───────────────────────────────────────────────────────
     def schedule_render(self) -> None:

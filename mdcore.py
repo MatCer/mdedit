@@ -144,6 +144,18 @@ def front_matter(text: str) -> dict[str, str]:
     return parse_meta(tokens[0].content) if tokens and tokens[0].type == "front_matter" else {}
 
 
+def set_template(text: str, name: str, today: str) -> str:
+    """Point the document at a template: rewrite or add the front matter's
+    `template:` line, or prepend a front matter skeleton with the keys the
+    templates use (title is also the PDF/HTML title)."""
+    m = re.match(r"---\n((?:.*\n)*?)---[ \t]*(?:\n|$)", text)
+    line = f"template: {name}\n"
+    if not m:
+        return f"---\n{line}title: \nheader: \nfooter: {today}\n---\n\n{text}"
+    body, n = re.subn(r"^template\s*:.*\n", line, m.group(1), count=1, flags=re.M)
+    return "---\n" + (body if n else line + body) + text[m.end(1):]
+
+
 def _is_mermaid(token) -> bool:
     return token.info.strip().split(maxsplit=1)[:1] == ["mermaid"]
 

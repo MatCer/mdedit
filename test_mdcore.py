@@ -69,6 +69,15 @@ def test_template_css_makes_relative_urls_absolute():
     assert 'url("data:x")' in out and "url(https://x/y)" in out
 
 
+def test_set_template_updates_or_creates_front_matter():
+    assert mdcore.set_template("# T\n", "acme", "5 October 2026") == (
+        "---\ntemplate: acme\ntitle: \nheader: \nfooter: 5 October 2026\n---\n\n# T\n"
+    )
+    fm = "---\ntitle: X\ntemplate: old\n---\n# T\n"
+    assert mdcore.set_template(fm, "acme", "d") == "---\ntitle: X\ntemplate: acme\n---\n# T\n"
+    assert mdcore.set_template("---\ntitle: X\n---\n", "acme", "d") == "---\ntemplate: acme\ntitle: X\n---\n"
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
