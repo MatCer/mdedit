@@ -153,7 +153,8 @@ directory each:
 
 A document picks one in its front matter; `md2pdf --template=NAME` overrides it.
 The other keys become hidden `.meta-<key>` elements a template can put into the
-page header or footer, and `title` also sets the PDF title:
+page header or footer, and `title` also sets the PDF title In mdedit, the toolbar's
+**Template** menu lists the installed templates and writes this block for you:
 
 ```markdown
 ---
